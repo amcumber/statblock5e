@@ -1,28 +1,31 @@
 #!/usr/bin/env python
 
 import argparse
-import os.path as p
+from os import path
 import re
 from bs4 import BeautifulSoup
 
-DIR_OF_THIS_SCRIPT = p.dirname(p.abspath(__file__))
+ROOT = path.join(path.dirname(path.realpath(__file__)), '..')
+JS_DIR = path.join(ROOT, 'src', 'js')
 
 
-def getDocument(content):
-    return BeautifulSoup(content, 'html5lib', from_encoding='utf-8')
+def get_document(content):
+    return BeautifulSoup(content, 'html5lib')  # OBE: , from_encoding='utf-8')
 
 
-def generateInlineFile(source_file_path):
-    final_doc = getDocument('')
-    doc = getDocument(open(source_file_path).read())
+def generate_inline_file(source_file_path):
+    source_file_path = path.realpath(source_file_path)
+    final_doc = get_document('')
+    with open(source_file_path) as fh:
+        doc = get_document(fh.read())
     already_processed = set()
 
     # Process each javascript module declared in the original file
     modules = doc.select('script[type="module"]')
     for module in modules:
-        module_path = p.join(p.dirname(source_file_path), module['src'])
+        module_path = path.join(JS_DIR, module['filename'])
         module.decompose()
-        processJavascriptModule(module_path, already_processed, final_doc)
+        process_js_module(module_path, already_processed, final_doc)
 
     # Append other head elements from the original file
     for child in doc.head.children:
@@ -30,7 +33,7 @@ def generateInlineFile(source_file_path):
             final_doc.head.append(child)
 
     # Append a script tag containing createCustomElement() to the head
-    script_tag = generateCreateCustomElementFunction()
+    script_tag = generate_create_custom_element()
     final_doc.head.append(script_tag)
 
     # Append the stat-block tree to the body
@@ -40,36 +43,42 @@ def generateInlineFile(source_file_path):
     return final_doc
 
 
-def processJavascriptModule(module_path, already_processed, final_doc):
+def process_js_module(module_path, already_processed, final_doc):
+    module_path = path.realpath(module_path)
     if module_path in already_processed:
-        return
+        return None
     already_processed.add(module_path)
 
-    content = open(p.abspath(module_path)).read()  # FIXME
+    with open(path.realpath(module_path)) as fh:
+        content = fh.read()
 
     # Process any imported modules if they haven't been processed already
     imports = re.findall(r'(?<=import \').*(?=\')', content)
     for import_path in imports:
-        import_path = import_path.lstrip('/')
-        processJavascriptModule(import_path, already_processed, final_doc)
+        import_path = path.join(ROOT, import_path.lstrip('/'))
+        process_js_module(import_path, already_processed, final_doc)
 
     # Find the last fetch() in the module to get the path to the HTML template
     fetches = re.findall(r'(?<=fetch\(\').*(?=\'\))', content)
-    template_path = fetches[-1]
-    template_name = p.splitext(p.basename(template_path))[0]
+    template_path = path.join(ROOT, fetches[-1])
+    template_name = path.splitext(path.basename(template_path))[0]
 
     # Convert the module into a pair of inline template and script tags,
     # and add them to the body of the final document
-    template_tag = generateTemplateTag(template_name, template_path)
-    script_tag = generateScriptTag(template_name, content)
+    template_tag = generate_template_tag(template_name, template_path)
+    script_tag = generate_script_tag(template_name, content)
 
     final_doc.body.append(template_tag)
     final_doc.body.append(script_tag)
 
 
-def generateCreateCustomElementFunction():
-    doc = getDocument('')
-    content = open(p.abspath('src/js/helpers/create-custom-element.js')).read()
+def generate_create_custom_element():
+    doc = get_document('')
+    cce_fn = path.realpath(
+        path.join(JS_DIR, 'helpers', 'create-custom-element.js')
+    )
+    with open(cce_fn) as fh:
+        content = fh.read()
     content = content.replace('export ', '')
 
     script_tag = doc.new_tag('script')
@@ -78,9 +87,9 @@ def generateCreateCustomElementFunction():
     return script_tag
 
 
-def generateTemplateTag(template_name, template_path):
-    content = open(p.abspath(template_path)).read()
-    template_doc = getDocument(content)
+def generate_template_tag(template_name, template_path):
+    with open(path.realpath(template_path)) as fh:
+        template_doc = get_document(fh.read())
 
     template_tag = template_doc.new_tag('template', id=template_name)
     for child in template_doc.head.children:
@@ -91,14 +100,14 @@ def generateTemplateTag(template_name, template_path):
     return template_tag
 
 
-def generateScriptTag(template_name, content):
-    doc = getDocument('')
+def generate_script_tag(template_name, content):
+    doc = get_document('')
     script_tag = doc.new_tag('script')
 
     # Special case: Extract additional javascript functions
     #               for the abilities-block tag only
     if template_name == 'abilities-block':
-        javascript_content = extractInlineJavascript(content)
+        javascript_content = extract_inline_js(content)
         script_tag.string = f"""{{
   {javascript_content}
   let templateElement = document.getElementById('{template_name}');
@@ -113,38 +122,35 @@ def generateScriptTag(template_name, content):
     return script_tag
 
 
-def extractInlineJavascript(content):
-    extracted_content = '';
-    inExtractionMode = False
+def extract_inline_js(content):
+    extracted_content = ''
+    in_extraction_mode = False
     for line in content.splitlines():
-        if not inExtractionMode:
+        if not in_extraction_mode:
             if '// Inline extraction START' in line:
-                inExtractionMode = True
+                in_extraction_mode = True
         elif '// Inline extraction END' in line:
-            inExtractionMode = False
+            in_extraction_mode = False
         else:
-            extracted_content += line + '\n';
+            extracted_content += line + '\n'
     return extracted_content
 
 
-def parseArgs():
-    parser = argparse.ArgumentParser(description='Inlines HTML imports.')
-    parser.add_argument('--filename', '-f', required=True,
-                        help='file to inline')
-    return parser.parse_args()
-
-
-def main():
-    args = parseArgs()
-    print('<!DOCTYPE html>')
-    print(generateInlineFile(p.abspath(args.filename)))
-
-
-def alt_main(filename):
+def main(filename):
     return '\n'.join(
-        (str('<!DOCTYPE html>'), str(generateInlineFile(filename)))
+        ('<!DOCTYPE html>', str(generate_inline_file(path.realpath(filename))))
     )
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Inlines HTML imports.')
+    parser.add_argument('--filename', '-f', required=True,
+                        help='file to inline')
+    parser.add_argument('--output', '-o', help='file output', default=None)
+    args = parser.parse_args()
+    compiled_doc = main(args.filename)
+    if args.output is None:
+        print(compiled_doc)
+    else:
+        with open(path.realpath(args.output), 'w') as file:
+            file.write(compiled_doc)
